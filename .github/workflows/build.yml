@@ -1,4 +1,4 @@
-name: Build sbnb (Robust Buildroot CI)
+name: Build sbnb
 on:
   push:
     branches: [ "main" ]
@@ -8,8 +8,6 @@ on:
       - 'containers/**'
       - 'images/**'
       - 'misc/**'
-      - '.github/workflows/**'
-      - '!.github/workflows/build.yml'
   repository_dispatch:
     types: [trigger-build]
   workflow_dispatch:
@@ -29,9 +27,8 @@ permissions:
 
 jobs:
   build:
+    # Keep ubuntu-latest as Buildroot often requires significant resources
     runs-on: ubuntu-latest
-    env:
-      TARGET_KERNEL_VERSION: "v6.8"
 
     steps:
       - name: Maximize Build Disk Space
@@ -49,194 +46,81 @@ jobs:
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: recursive # Ensure submodules like buildroot are checked out
 
       - name: Output Run Info
         run: |
-          echo "Workflow: ${{ github.workflow }}"
           echo "Run ID: ${{ github.run_id }}"
           echo "Run Number: ${{ github.run_number }}"
           echo "Run Attempt: ${{ github.run_attempt }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "Branch/Ref: ${{ github.ref }}"
-          echo "Commit SHA: ${{ github.sha }}"
-          echo "Workspace: $GITHUB_WORKSPACE"
-          echo "Kernel Version: ${{ env.TARGET_KERNEL_VERSION }}"
+      - name: Generate build id
+        run: echo "IMAGE_VERSION=$(date +%Y.%m.%d)-$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
 
-      - name: Generate build version
-        run: echo "IMAGE_VERSION=$(date +%Y.%m.%d)-${GITHUB_RUN_NUMBER}" >> $GITHUB_ENV
-
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
+          # Need qemu-utils for VHD conversion, syslinux-utils for host tools, mtools for syslinux install on FAT
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential libncurses-dev unzip bc git file wget cpio \
-            python3 python3-dev python3-pip rsync perl libssl-dev ccache \
-            qemu-utils syslinux-utils mtools
-          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
-
-      - name: Fix script permissions
-        run: |
-          find . -type f -name "*.sh" -exec chmod +x {} \; || true
-
-      - name: Prepare ccache directory
-        run: |
-          mkdir -p ~/.buildroot-ccache
-
-      - name: Ensure busybox.fragment exists
-        run: |
-          if [ ! -f board/sbnb/sbnb/busybox.fragment ]; then
-            mkdir -p board/sbnb/sbnb
-            echo "CONFIG_FEATURE_SUID=y" > board/sbnb/sbnb/busybox.fragment
-          fi
-
-      - name: Ensure patch directories and log missing patches
-        run: |
-          # Example for sudo package, repeat for other packages as needed
-          PATCH_DIR=package/sudo
-          if [ -d "$PATCH_DIR" ]; then
-            if ls $PATCH_DIR/*.patch 1> /dev/null 2>&1; then
-              echo "Patch files found in $PATCH_DIR"
-            else
-              echo "::warning::No patch files found in $PATCH_DIR"
-            fi
-          else
-            echo "::warning::Patch directory $PATCH_DIR does not exist"
-          fi
-          # Add similar checks for other packages as needed
-
-      - name: Restore Buildroot Download Cache
-        id: dl-cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: buildroot/dl
-          key: buildroot-dl-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            buildroot-dl-${{ runner.os }}-
-
-      - name: Restore Buildroot CCache
-        id: ccache-restore
-        uses: actions/cache/restore@v4
+          sudo apt-get install -y qemu-utils syslinux-utils mtools --no-install-recommends
+      - name: Buildroot CCache
+        id: ccache # Add id for potential use in save step key logic if needed
+        uses: actions/cache@v4
         with:
           path: ~/.buildroot-ccache
-          key: buildroot-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          # Key includes SHA for precise match, restore keys provide fallbacks
+          key: buildroot-ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             buildroot-ccache-${{ runner.os }}-${{ github.ref_name }}-
             buildroot-ccache-${{ runner.os }}-
-
-      - name: Restore Buildroot output cache
-        id: output-cache-restore
-        uses: actions/cache/restore@v4
+      - name: Buildroot output cache (Optimized - Excludes 'build' dir)
+        id: output-cache # Add id for potential use in save step key logic if needed
+        uses: actions/cache@v4
         with:
           path: |
-            buildroot/output/host
-            buildroot/output/staging
-            buildroot/output/target
-            buildroot/output/images
-          key: buildroot-output-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+            buildroot/output/host    # Cache host tools
+            buildroot/output/staging # Cache staging dir
+            buildroot/output/target  # Cache target rootfs overlay contents
+            # buildroot/output/build # EXCLUDED to save disk space during cache operations
+          # Adjusted key name to reflect the change
+          key: buildroot-output-slim-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
-            buildroot-output-${{ runner.os }}-${{ github.ref_name }}-
-            buildroot-output-${{ runner.os }}-
-
-      - name: Verify kernel version exists in remote repository
-        run: |
-          KERNEL_REPO=$(grep BR2_LINUX_KERNEL_CUSTOM_REPO_URL configs/sbnb_defconfig | cut -d'"' -f2)
-          if [ -z "$KERNEL_REPO" ]; then
-            echo "::warning::No custom kernel repo URL found in defconfig. Skipping kernel version check."
-            exit 0
-          fi
-          if ! git ls-remote --exit-code --tags "$KERNEL_REPO" "refs/tags/${TARGET_KERNEL_VERSION}" && \
-             ! git ls-remote --exit-code --heads "$KERNEL_REPO" "refs/heads/${TARGET_KERNEL_VERSION}"; then
-            echo "::error::Kernel version '${TARGET_KERNEL_VERSION}' not found in $KERNEL_REPO."
-            echo "Available tags:"
-            git ls-remote --tags "$KERNEL_REPO"
-            echo "Available branches:"
-            git ls-remote --heads "$KERNEL_REPO"
-            exit 1
-          fi
-          echo "Kernel version '${TARGET_KERNEL_VERSION}' found in $KERNEL_REPO."
-
-      - name: Configure Buildroot & Apply Optimizations
+            buildroot-output-slim-${{ runner.os }}-${{ github.ref_name }}-
+            buildroot-output-slim-${{ runner.os }}-
+      - name: Configure Buildroot
         run: |
           cd buildroot
           make BR2_EXTERNAL=.. sbnb_defconfig
-          sed -i 's/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="svsm"/BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="${{ env.TARGET_KERNEL_VERSION }}"/' .config || true
-          cat << EOF >> .config
-          BR2_CCACHE=y
-          BR2_CCACHE_DIR="$(realpath ~/.buildroot-ccache)"
-          BR2_PER_PACKAGE_DIRECTORIES=y
-          BR2_OPTIMIZE_SPACE=y
-          EOF
-          make olddefconfig
-
-      - name: Ensure rsync directories exist
-        run: |
-          mkdir -p buildroot/output/per-package/host-skeleton/host
-          mkdir -p /home/runner/work/sbnb/sbnb/buildroot/output/per-package/host-pkgconf/host
-          rsync -av --progress --debug=all --link-dest=/home/runner/work/sbnb/sbnb/buildroot/output/per-package/host-pkgconf/host /source/path /destination/path || exit 1
-
       - name: Check Disk Space Before Build
         run: df -h .
 
-      - name: Run make (Build Buildroot Project)
+      - name: Run make
         run: |
           cd buildroot
-          export CCACHE_DIR="$(realpath ~/.buildroot-ccache)"
-          export CCACHE_MAXSIZE="5G"
-          make HOST_DIR=$(pwd)/output/host -j$(nproc) V=1
-
-      - name: Check Disk Space After Build
-        if: always()
+          # Pass HOST_DIR to make environment so post-image scripts can find host tools
+          echo "Starting make process..."
+          make HOST_DIR=$(pwd)/output/host -j $(nproc)
+          echo "Make process finished."
+      - name: Check Disk Space After Build (Before Cleanup)
         run: df -h .
 
-      - name: Cleanup build artifacts
-        if: always()
+      # --- Cleanup Step ---
+      - name: Free up disk space by removing build artifacts
+        # This step removes the large intermediate build directory after compilation
+        # to free up space before artifact upload and cache saving.
+        # WARNING: This prevents caching of 'output/build', potentially slowing down
+        # subsequent builds that rely heavily on cached intermediate objects.
+        if: runner.os == 'Linux'
         run: |
-          rm -rf buildroot/output/build || true
+          echo "Attempting to remove buildroot/output/build to free space..."
+          rm -rf buildroot/output/build
+          echo "Cleanup complete."
+      - name: Check Disk Space After Cleanup
+        run: df -h .
+      # --- End Cleanup Step ---
 
-      - name: Ensure cache directories exist
-        if: always()
-        run: |
-          for dir in buildroot/dl buildroot/output/host buildroot/output/staging buildroot/output/target buildroot/output/images; do
-            if [ -e "$dir" ] && [ ! -d "$dir" ]; then
-              echo "::warning::Path '$dir' exists but is not a directory. Removing it."
-              rm -rf "$dir"
-            fi
-            mkdir -p "$dir"
-          done
-
-      - name: Save Buildroot Download Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: buildroot/dl
-          key: buildroot-dl-${{ runner.os }}-${{ github.run_id }}
-
-      - name: Save Buildroot CCache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.buildroot-ccache
-          key: buildroot-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Save Buildroot output cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            buildroot/output/host
-            buildroot/output/staging
-            buildroot/output/target
-            buildroot/output/images
-          key: buildroot-output-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Upload sbnb images as artifacts
-        if: success()
+      - name: Save sbnb images
         uses: actions/upload-artifact@v4
         with:
           name: sbnb-images-${{ env.IMAGE_VERSION }}
           path: |
             buildroot/output/images/sbnb.raw.zip
             buildroot/output/images/sbnb.vhd
-          if-no-files-found: error
-          retention-days: 7
