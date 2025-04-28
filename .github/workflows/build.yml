@@ -8,9 +8,6 @@ on:
       - 'containers/**'
       - 'images/**'
       - 'misc/**'
-  repository_dispatch:
-    types: [trigger-build]
-  workflow_dispatch:
   pull_request:
     branches: [ "main" ]
     paths-ignore:
@@ -19,103 +16,102 @@ on:
       - 'containers/**'
       - 'images/**'
       - 'misc/**'
+  repository_dispatch:
+    types: [ trigger-build ]
+  workflow_dispatch:
 
 permissions:
   contents: write
-  pages: write
+  pages:   write
   id-token: write
 
 jobs:
   build:
-    # Keep ubuntu-latest as Buildroot often requires significant resources
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Maximize Build Disk Space
         uses: AdityaGarg8/remove-unwanted-software@v5
         with:
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+          remove-dotnet:         'true'
+          remove-android:        'true'
+          remove-haskell:        'true'
+          remove-codeql:         'true'
+          remove-docker-images:  'true'
           remove-large-packages: 'true'
-          remove-cached-tools: 'true'
-          remove-swapfile: 'false'
+          remove-cached-tools:   'true'
+          remove-swapfile:       'false'
 
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive # Ensure submodules like buildroot are checked out
+          submodules: recursive
 
       - name: Output Run Info
         run: |
-          echo "Run ID: ${{ github.run_id }}"
-          echo "Run Number: ${{ github.run_number }}"
-          echo "Run Attempt: ${{ github.run_attempt }}"
+          echo "Run ID:       ${{ github.run_id }}"
+          echo "Run Number:   ${{ github.run_number }}"
+          echo "Run Attempt:  ${{ github.run_attempt }}"
+
       - name: Generate build id
         run: echo "IMAGE_VERSION=$(date +%Y.%m.%d)-$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
 
       - name: Install dependencies
         run: |
-          # Need qemu-utils for VHD conversion, syslinux-utils for host tools, mtools for syslinux install on FAT
-          sudo apt-get update
-          sudo apt-get install -y qemu-utils syslinux-utils mtools --no-install-recommends
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-utils syslinux-utils mtools curl
+
       - name: Buildroot CCache
-        id: ccache # Add id for potential use in save step key logic if needed
         uses: actions/cache@v4
+        id: ccache
         with:
           path: ~/.buildroot-ccache
-          # Key includes SHA for precise match, restore keys provide fallbacks
           key: buildroot-ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             buildroot-ccache-${{ runner.os }}-${{ github.ref_name }}-
             buildroot-ccache-${{ runner.os }}-
-      - name: Buildroot output cache (Optimized - Excludes 'build' dir)
-        id: output-cache # Add id for potential use in save step key logic if needed
+
+      - name: Buildroot output cache (slim)
         uses: actions/cache@v4
+        id: output-cache
         with:
           path: |
-            buildroot/output/host    # Cache host tools
-            buildroot/output/staging # Cache staging dir
-            buildroot/output/target  # Cache target rootfs overlay contents
-            # buildroot/output/build # EXCLUDED to save disk space during cache operations
-          # Adjusted key name to reflect the change
+            buildroot/output/host
+            buildroot/output/staging
+            buildroot/output/target
           key: buildroot-output-slim-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             buildroot-output-slim-${{ runner.os }}-${{ github.ref_name }}-
             buildroot-output-slim-${{ runner.os }}-
+
       - name: Configure Buildroot
         run: |
           cd buildroot
           make BR2_EXTERNAL=.. sbnb_defconfig
+
       - name: Check Disk Space Before Build
         run: df -h .
 
       - name: Run make
         run: |
           cd buildroot
-          # Pass HOST_DIR to make environment so post-image scripts can find host tools
           echo "Starting make process..."
-          make HOST_DIR=$(pwd)/output/host -j $(nproc)
+          make HOST_DIR=$(pwd)/output/host -j "$(nproc)"
           echo "Make process finished."
-      - name: Check Disk Space After Build (Before Cleanup)
+
+      - name: Check Disk Space After Build
         run: df -h .
 
-      # --- Cleanup Step ---
       - name: Free up disk space by removing build artifacts
-        # This step removes the large intermediate build directory after compilation
-        # to free up space before artifact upload and cache saving.
-        # WARNING: This prevents caching of 'output/build', potentially slowing down
-        # subsequent builds that rely heavily on cached intermediate objects.
         if: runner.os == 'Linux'
         run: |
-          echo "Attempting to remove buildroot/output/build to free space..."
+          echo "Removing intermediate build directory..."
           rm -rf buildroot/output/build
-          echo "Cleanup complete."
+
       - name: Check Disk Space After Cleanup
         run: df -h .
-      # --- End Cleanup Step ---
 
       - name: Save sbnb images
         uses: actions/upload-artifact@v4
