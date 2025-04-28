@@ -172,6 +172,8 @@ jobs:
       - name: Ensure rsync directories exist
         run: |
           mkdir -p buildroot/output/per-package/host-skeleton/host
+          mkdir -p /home/runner/work/sbnb/sbnb/buildroot/output/per-package/host-pkgconf/host
+          rsync -av --progress --debug=all --link-dest=/home/runner/work/sbnb/sbnb/buildroot/output/per-package/host-pkgconf/host /source/path /destination/path || exit 1
 
       - name: Check Disk Space Before Build
         run: df -h .
