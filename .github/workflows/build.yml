@@ -22,25 +22,24 @@ on:
 
 permissions:
   contents: write
-  pages:   write
+  pages: write
   id-token: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Maximize Build Disk Space
         uses: AdityaGarg8/remove-unwanted-software@v5
         with:
-          remove-dotnet:         'true'
-          remove-android:        'true'
-          remove-haskell:        'true'
-          remove-codeql:         'true'
-          remove-docker-images:  'true'
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
           remove-large-packages: 'true'
-          remove-cached-tools:   'true'
-          remove-swapfile:       'false'
+          remove-cached-tools: 'true'
+          remove-swapfile: 'false'
 
       - name: Checkout repository and submodules
         uses: actions/checkout@v4
@@ -56,11 +55,23 @@ jobs:
       - name: Generate build id
         run: echo "IMAGE_VERSION=$(date +%Y.%m.%d)-$GITHUB_RUN_NUMBER" >> $GITHUB_ENV
 
+      - name: Free up disk space before installing dependencies
+        run: |
+          sudo rm -rf /var/cache/apt/* \
+                      /usr/share/man/* \
+                      /usr/share/doc/*
+
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-utils syslinux-utils mtools curl
+            qemu-utils syslinux-utils mtools curl \
+            gcc binutils
+
+      - name: Install EFI stub package
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends systemd-boot
 
       - name: Buildroot CCache
         uses: actions/cache@v4
@@ -93,12 +104,19 @@ jobs:
       - name: Check Disk Space Before Build
         run: df -h .
 
-      - name: Run make
+      - name: Run make (verbose)
         run: |
           cd buildroot
           echo "Starting make process..."
-          make HOST_DIR=$(pwd)/output/host -j "$(nproc)"
+          make HOST_DIR=$(pwd)/output/host -j "$(nproc)" V=1 2>&1 | tee build.log
           echo "Make process finished."
+
+      - name: Capture build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: buildroot/build.log
 
       - name: Check Disk Space After Build
         run: df -h .
