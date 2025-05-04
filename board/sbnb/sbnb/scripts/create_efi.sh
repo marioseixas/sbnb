@@ -10,7 +10,10 @@ STUB=/usr/lib/systemd/boot/efi/linuxx64.efi.stub
 KERNEL="${BINARIES_DIR}/bzImage"
 INITRD="${BINARIES_DIR}/rootfs-sbnb.cpio"
 OS_RELEASE="${TARGET_DIR}/etc/os-release"
-CMDLINE="console=tty0 console=ttyS0 earlyprintk verbose intel_iommu=on module_blacklist=nouveau,nvidiafb,snd_hda_intel dyndbg=\"module firmware_class +p; module microcode +p; module ccp +p\""
+# --- MODIFIED KERNEL COMMAND LINE (Read from Buildroot Env) ---
+# Read command line from BR2_CMDLINE environment variable provided by Buildroot.
+CMDLINE="${BR2_CMDLINE:?Error: BR2_CMDLINE environment variable not set or empty. Check Buildroot kernel configuration (BR2_CMDLINE).}"
+# --- END MODIFICATION ---
 CMDLINE_TMP=$(mktemp)
 OUTPUT=sbnb.efi
 
@@ -43,5 +46,12 @@ objcopy \
     --add-section .initrd="${INITRD}" --change-section-vma .initrd=$(printf 0x%x $initrd_offs) \
     "${STUB}" "${OUTPUT}"
 
+# Clean up temporary file
+rm -f "${CMDLINE_TMP}"
+
 # Output the result
 echo "Output: ${OUTPUT}"
+
+# Move the final EFI file to the standard Buildroot images directory (BINARIES_DIR=output/images)
+mv "${OUTPUT}" "${BINARIES_DIR}/"
+echo "Moved ${OUTPUT} to ${BINARIES_DIR}/"
