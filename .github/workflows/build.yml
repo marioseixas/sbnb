@@ -121,15 +121,6 @@ jobs:
       - name: Check Disk Space After Build
         run: df -h .
 
-      - name: Free up disk space by removing build artifacts
-        if: runner.os == 'Linux'
-        run: |
-          echo "Removing intermediate build directory..."
-          rm -rf buildroot/output/build
-
-      - name: Check Disk Space After Cleanup
-        run: df -h .
-
       - name: Save sbnb images
         uses: actions/upload-artifact@v4
         with:
